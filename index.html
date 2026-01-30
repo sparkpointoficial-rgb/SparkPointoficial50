@@ -239,7 +239,6 @@
         // ИНИЦИАЛИЗАЦИЯ
         // ==============================
         window.addEventListener('load', async () => {
-            // 1. Сначала проверяем URL параметры (до инициализации Web3)
             handleUrlParams();
             
             if (typeof window.ethereum !== 'undefined') {
@@ -275,11 +274,9 @@
             const refParam = urlParams.get('ref');
             
             if (refParam && refParam.match(/^0x[a-fA-F0-9]{40}$/)) {
-                // Сохраняем и отображаем сразу
                 localStorage.setItem('sparkpoint_referrer', refParam);
                 applyReferrer(refParam);
             } else {
-                // Если нет в URL, проверяем LocalStorage
                 const savedRef = localStorage.getItem('sparkpoint_referrer');
                 if (savedRef) {
                     applyReferrer(savedRef);
@@ -288,30 +285,21 @@
         }
 
         function applyReferrer(address) {
-            // Визуальное отображение
             currentRefAddress.textContent = shortenAddress(address);
             currentRefInfo.style.display = 'block';
-            
-            // Заполнение формы регистрации
             referrerAddressInput.value = address;
-            // Делаем поле "readonly" если есть реферер, чтобы случайно не стерли
-            // Но оставляем возможность редактировать если нажмут "Сбросить"
             referrerAddressInput.style.backgroundColor = 'rgba(0, 255, 157, 0.05)';
         }
 
         function clearReferralParam() {
             const newUrl = window.location.href.split('?')[0];
             window.history.replaceState({}, document.title, newUrl);
-            
             localStorage.removeItem('sparkpoint_referrer');
-            
             currentRefInfo.style.display = 'none';
             referrerAddressInput.value = '';
             referrerAddressInput.style.backgroundColor = '';
-            
             referrerStatus.innerHTML = '';
             referrerCheckResult.style.display = 'none';
-            
             showMessage('Пригласитель сброшен. Введите адрес вручную.', 'info', globalMessage);
         }
 
@@ -331,10 +319,8 @@
             }
             
             try {
-                // Важно: приводим к Checksum Address перед отправкой
                 const checksumAddress = web3.utils.toChecksumAddress(referrerAddress);
                 
-                // Проверяем, не пытаемся ли мы указать сами себя
                 if (userAccount && checksumAddress.toLowerCase() === userAccount.toLowerCase()) {
                     referrerStatus.innerHTML = '<span style="color: #ff416c;">Вы не можете быть своим пригласителем</span>';
                     referrerCheckResult.style.display = 'none';
@@ -374,10 +360,8 @@
                 showMessage('Сначала подключите кошелек', 'error', globalMessage);
                 return;
             }
-            
             const currentUrl = window.location.href.split('?')[0];
             const refLink = `${currentUrl}?ref=${userAccount}`;
-            
             referralLink.value = refLink;
             copyToClipboard(refLink);
         }
@@ -403,7 +387,6 @@
             document.body.appendChild(textArea);
             textArea.focus();
             textArea.select();
-            
             try {
                 document.execCommand('copy');
                 showMessage('Ссылка скопирована!', 'success', globalMessage);
@@ -421,12 +404,9 @@
                 web3 = new Web3(window.ethereum);
                 contract = new web3.eth.Contract(CONTRACT_ABI, CONTRACT_ADDRESS);
                 console.log('Web3 инициализирован');
-                
-                // Если поле пригласителя уже заполнено (из URL или localStorage), проверяем его в блокчейне
                 if (referrerAddressInput.value) {
                     checkReferrerExists();
                 }
-                
             } catch (error) {
                 console.error('Ошибка Web3:', error);
             }
@@ -448,7 +428,6 @@
                 await checkIfAdmin();
                 await loadUserData();
                 
-                // Повторная проверка пригласителя (чтобы убедиться что не приглашаем сами себя)
                 if (referrerAddressInput.value) {
                     checkReferrerExists();
                 }
@@ -504,7 +483,6 @@
             try {
                 const userData = await contract.methods.users(userAccount).call();
                 
-                // Формируем реф. ссылку для текущего юзера
                 const currentUrl = window.location.href.split('?')[0];
                 const refLink = `${currentUrl}?ref=${userAccount}`;
                 referralLink.value = refLink;
@@ -514,12 +492,6 @@
                 } else {
                     updateUserStats(userData);
                     updateUserLevels(userData);
-                }
-                
-                // Если юзер не существует и поля пусты, можно подставить админа (опционально)
-                // Но лучше оставить поле пустым или то, что пришло по рефке
-                if (!userData.exists && !referrerAddressInput.value) {
-                    // Оставляем пустым, чтобы пользователь ввел сам или прошел по ссылке
                 }
                 
             } catch (error) {
@@ -581,7 +553,20 @@
             
             for (let level = 1; level <= 10; level++) {
                 const threshold = LEVEL_THRESHOLDS[level] || 0;
-                const referrals = (level === currentLevel) ? parseInt(userData.referralsInLevel) : 0;
+                
+                // === ИЗМЕНЕННАЯ ЛОГИКА ОТОБРАЖЕНИЯ ===
+                let referrals;
+                if (level < currentLevel) {
+                    // Если уровень уже пройден, считаем, что все места заполнены (полностью зеленый)
+                    referrals = threshold;
+                } else if (level === currentLevel) {
+                    // Если это текущий уровень, показываем реальный прогресс
+                    referrals = parseInt(userData.referralsInLevel);
+                } else {
+                    // Будущие уровни пустые
+                    referrals = 0;
+                }
+                // =====================================
                 
                 let circlesHTML = '';
                 for (let i = 0; i < threshold; i++) {
@@ -655,7 +640,6 @@
                 
             } catch (error) {
                 console.error('Ошибка регистрации:', error);
-                // Пытаемся достать понятную ошибку
                 let msg = error.message;
                 if (msg.includes('Referrer does not exist')) msg = 'Пригласитель не найден в системе';
                 if (msg.includes('Referrer already has 2 referrals')) msg = 'У пригласителя нет мест';
@@ -741,3 +725,4 @@
     </script>
 </body>
 </html>
+
