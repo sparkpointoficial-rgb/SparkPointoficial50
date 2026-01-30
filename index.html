@@ -86,6 +86,7 @@
         .referrer-check { margin-top: 10px; font-size: 0.9rem; padding: 8px; border-radius: 5px; }
         .referrer-valid { background: rgba(0, 255, 157, 0.1); color: #00ff9d; border: 1px solid rgba(0, 255, 157, 0.3); }
         .referrer-invalid { background: rgba(255, 65, 108, 0.1); color: #ff416c; border: 1px solid rgba(255, 65, 108, 0.3); }
+        .referrer-locked { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(0, 255, 157, 0.3); color: #8a9ba8; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -119,14 +120,11 @@
                         <div class="link-container">
                             <input type="text" id="referralLink" readonly value="Подключите кошелек для получения ссылки">
                             <button class="copy-btn" onclick="copyReferralLink()">Копировать</button>
-                            <button class="clear-btn" onclick="clearReferralParam()">Очистить</button>
                         </div>
                         <div id="referrerCheckResult" class="referrer-check" style="display: none;"></div>
                         <div id="currentRefInfo" class="ref-info" style="display: none;">
-                            Текущий пригласитель: <span id="currentRefAddress"></span>
-                        </div>
-                        <div style="margin-top: 15px; font-size: 0.9rem; color: #8a9ba8;">
-                            Скопируйте эту ссылку и отправьте друзьям. При регистрации по вашей ссылке они автоматически станут вашими рефералами.
+                            По приглашению: <span id="currentRefAddress"></span>
+                            <button class="clear-btn" onclick="clearReferralParam()" style="margin-left: 10px; padding: 2px 8px; font-size: 0.8rem;">Сбросить</button>
                         </div>
                     </div>
                 </div>
@@ -205,7 +203,6 @@
         let contract;
         let userAccount;
         let isAdmin = false;
-        let currentReferrer = null;
         
         // ==============================
         // ЭЛЕМЕНТЫ DOM
@@ -242,8 +239,8 @@
         // ИНИЦИАЛИЗАЦИЯ
         // ==============================
         window.addEventListener('load', async () => {
-            // Проверяем реферальную ссылку при загрузке
-            checkReferralParam();
+            // 1. Сначала проверяем URL параметры (до инициализации Web3)
+            handleUrlParams();
             
             if (typeof window.ethereum !== 'undefined') {
                 console.log('MetaMask обнаружен');
@@ -267,13 +264,57 @@
             withdrawBtn.addEventListener('click', withdrawAdminFees);
             searchBtn.addEventListener('click', searchUser);
             
-            // Добавляем обработчик изменения поля пригласителя
             referrerAddressInput.addEventListener('input', checkReferrerExists);
         });
         
         // ==============================
-        // ФУНКЦИИ ПРОВЕРКИ ПРИГЛАСИТЕЛЯ
+        // ФУНКЦИИ ОБРАБОТКИ РЕФЕРАЛОВ
         // ==============================
+        function handleUrlParams() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const refParam = urlParams.get('ref');
+            
+            if (refParam && refParam.match(/^0x[a-fA-F0-9]{40}$/)) {
+                // Сохраняем и отображаем сразу
+                localStorage.setItem('sparkpoint_referrer', refParam);
+                applyReferrer(refParam);
+            } else {
+                // Если нет в URL, проверяем LocalStorage
+                const savedRef = localStorage.getItem('sparkpoint_referrer');
+                if (savedRef) {
+                    applyReferrer(savedRef);
+                }
+            }
+        }
+
+        function applyReferrer(address) {
+            // Визуальное отображение
+            currentRefAddress.textContent = shortenAddress(address);
+            currentRefInfo.style.display = 'block';
+            
+            // Заполнение формы регистрации
+            referrerAddressInput.value = address;
+            // Делаем поле "readonly" если есть реферер, чтобы случайно не стерли
+            // Но оставляем возможность редактировать если нажмут "Сбросить"
+            referrerAddressInput.style.backgroundColor = 'rgba(0, 255, 157, 0.05)';
+        }
+
+        function clearReferralParam() {
+            const newUrl = window.location.href.split('?')[0];
+            window.history.replaceState({}, document.title, newUrl);
+            
+            localStorage.removeItem('sparkpoint_referrer');
+            
+            currentRefInfo.style.display = 'none';
+            referrerAddressInput.value = '';
+            referrerAddressInput.style.backgroundColor = '';
+            
+            referrerStatus.innerHTML = '';
+            referrerCheckResult.style.display = 'none';
+            
+            showMessage('Пригласитель сброшен. Введите адрес вручную.', 'info', globalMessage);
+        }
+
         async function checkReferrerExists() {
             const referrerAddress = referrerAddressInput.value.trim();
             
@@ -283,7 +324,6 @@
                 return;
             }
             
-            // Проверяем формат адреса
             if (!web3.utils.isAddress(referrerAddress)) {
                 referrerStatus.innerHTML = '<span style="color: #ff416c;">Неверный формат адреса</span>';
                 referrerCheckResult.style.display = 'none';
@@ -291,82 +331,41 @@
             }
             
             try {
+                // Важно: приводим к Checksum Address перед отправкой
                 const checksumAddress = web3.utils.toChecksumAddress(referrerAddress);
+                
+                // Проверяем, не пытаемся ли мы указать сами себя
+                if (userAccount && checksumAddress.toLowerCase() === userAccount.toLowerCase()) {
+                    referrerStatus.innerHTML = '<span style="color: #ff416c;">Вы не можете быть своим пригласителем</span>';
+                    referrerCheckResult.style.display = 'none';
+                    return;
+                }
+
                 const referrerData = await contract.methods.users(checksumAddress).call();
                 
                 if (referrerData.exists) {
-                    // Проверяем, не является ли это адресом текущего пользователя
-                    if (userAccount && checksumAddress.toLowerCase() === userAccount.toLowerCase()) {
-                        referrerStatus.innerHTML = '<span style="color: #ff416c;">Вы не можете указать себя в качестве пригласителя</span>';
-                        referrerCheckResult.style.display = 'none';
-                        return;
-                    }
-                    
-                    // Проверяем, не достиг ли пригласитель лимита в 2 реферала
                     if (referrerData.totalDirectReferrals >= 2) {
-                        referrerStatus.innerHTML = `<span style="color: #ffaa00;">Пригласитель уже имеет 2 реферала (${referrerData.totalDirectReferrals}/2)</span>`;
+                        referrerStatus.innerHTML = `<span style="color: #ffaa00;">У этого пригласителя мест нет (2/2)</span>`;
                     } else {
-                        referrerStatus.innerHTML = `<span style="color: #00ff9d;">✓ Пригласитель найден (Уровень: ${referrerData.level}, Рефералов: ${referrerData.totalDirectReferrals}/2)</span>`;
+                        referrerStatus.innerHTML = `<span style="color: #00ff9d;">✓ Пригласитель валиден (Мест: ${2 - referrerData.totalDirectReferrals}/2)</span>`;
                     }
                     
-                    // Показываем дополнительную информацию
                     referrerCheckResult.innerHTML = `
-                        <div>Адрес пригласителя: ${shortenAddress(checksumAddress)}</div>
+                        <div>Адрес: ${shortenAddress(checksumAddress)}</div>
                         <div>Уровень: ${referrerData.level}</div>
-                        <div>Прямые рефералы: ${referrerData.totalDirectReferrals}/2</div>
-                        <div>Внутренний баланс: ${web3.utils.fromWei(referrerData.internalBalance, 'ether').substring(0, 8)} BNB</div>
+                        <div>Рефералов: ${referrerData.totalDirectReferrals}/2</div>
                     `;
                     referrerCheckResult.className = 'referrer-check referrer-valid';
                     referrerCheckResult.style.display = 'block';
                     
                 } else {
-                    referrerStatus.innerHTML = '<span style="color: #ff416c;">Этот адрес не зарегистрирован в системе</span>';
-                    referrerCheckResult.innerHTML = 'Этот адрес не зарегистрирован в системе SparkPoint. Укажите адрес существующего участника.';
+                    referrerStatus.innerHTML = '<span style="color: #ff416c;">Пригласитель не найден в системе</span>';
+                    referrerCheckResult.innerHTML = 'Этот адрес еще не зарегистрирован в SparkPoint.';
                     referrerCheckResult.className = 'referrer-check referrer-invalid';
                     referrerCheckResult.style.display = 'block';
                 }
             } catch (error) {
                 console.error('Ошибка проверки пригласителя:', error);
-                referrerStatus.innerHTML = '<span style="color: #ff416c;">Ошибка проверки пригласителя</span>';
-                referrerCheckResult.style.display = 'none';
-            }
-        }
-        
-        function checkReferralParam() {
-            const urlParams = new URLSearchParams(window.location.search);
-            const refParam = urlParams.get('ref');
-            
-            if (refParam) {
-                currentReferrer = refParam;
-                currentRefAddress.textContent = shortenAddress(refParam);
-                currentRefInfo.style.display = 'block';
-                
-                // Заполняем поле пригласителя
-                referrerAddressInput.value = refParam;
-                
-                // Сохраняем в localStorage
-                localStorage.setItem('sparkpoint_referrer', refParam);
-                
-                console.log('Обнаружен реферальный параметр:', refParam);
-                
-                // Проверяем существование пригласителя, если web3 уже инициализирован
-                if (web3 && contract) {
-                    setTimeout(() => checkReferrerExists(), 500);
-                }
-            } else {
-                // Проверяем localStorage
-                const savedRef = localStorage.getItem('sparkpoint_referrer');
-                if (savedRef) {
-                    currentReferrer = savedRef;
-                    currentRefAddress.textContent = shortenAddress(savedRef);
-                    currentRefInfo.style.display = 'block';
-                    referrerAddressInput.value = savedRef;
-                    
-                    // Проверяем существование пригласителя, если web3 уже инициализирован
-                    if (web3 && contract) {
-                        setTimeout(() => checkReferrerExists(), 500);
-                    }
-                }
             }
         }
         
@@ -376,20 +375,17 @@
                 return;
             }
             
-            // Создаем правильную ссылку
             const currentUrl = window.location.href.split('?')[0];
             const refLink = `${currentUrl}?ref=${userAccount}`;
             
             referralLink.value = refLink;
-            
-            // Копируем в буфер обмена
             copyToClipboard(refLink);
         }
         
         function copyToClipboard(text) {
             if (navigator.clipboard && window.isSecureContext) {
                 navigator.clipboard.writeText(text).then(() => {
-                    showMessage('Ссылка скопирована в буфер обмена!', 'success', globalMessage);
+                    showMessage('Ссылка скопирована!', 'success', globalMessage);
                 }).catch(err => {
                     useFallbackCopy(text);
                 });
@@ -410,51 +406,29 @@
             
             try {
                 document.execCommand('copy');
-                showMessage('Ссылка скопирована в буфер обмена', 'success', globalMessage);
+                showMessage('Ссылка скопирована!', 'success', globalMessage);
             } catch (err) {
-                console.error('Ошибка копирования:', err);
-                showMessage('Не удалось скопировать ссылку. Скопируйте вручную.', 'error', globalMessage);
+                showMessage('Не удалось скопировать', 'error', globalMessage);
             }
-            
             document.body.removeChild(textArea);
         }
         
-        function clearReferralParam() {
-            // Очищаем параметр из URL
-            const newUrl = window.location.href.split('?')[0];
-            window.history.replaceState({}, document.title, newUrl);
-            
-            // Очищаем переменные
-            currentReferrer = null;
-            currentRefInfo.style.display = 'none';
-            
-            // Очищаем поле ввода
-            referrerAddressInput.value = '';
-            
-            // Очищаем localStorage
-            localStorage.removeItem('sparkpoint_referrer');
-            
-            // Очищаем статус проверки
-            referrerStatus.innerHTML = '';
-            referrerCheckResult.style.display = 'none';
-            
-            showMessage('Реферальная ссылка очищена', 'info', globalMessage);
-        }
-        
         // ==============================
-        // ОСНОВНЫЕ ФУНКЦИИ
+        // WEB3 ФУНКЦИИ
         // ==============================
         async function initWeb3() {
             try {
                 web3 = new Web3(window.ethereum);
                 contract = new web3.eth.Contract(CONTRACT_ABI, CONTRACT_ADDRESS);
-                console.log('Web3 и контракт инициализированы');
+                console.log('Web3 инициализирован');
                 
-                // Перепроверяем реферальный параметр после инициализации web3
-                checkReferralParam();
+                // Если поле пригласителя уже заполнено (из URL или localStorage), проверяем его в блокчейне
+                if (referrerAddressInput.value) {
+                    checkReferrerExists();
+                }
+                
             } catch (error) {
-                console.error('Ошибка инициализации Web3:', error);
-                showMessage('Ошибка инициализации Web3: ' + error.message, 'error', globalMessage);
+                console.error('Ошибка Web3:', error);
             }
         }
         
@@ -474,10 +448,12 @@
                 await checkIfAdmin();
                 await loadUserData();
                 
-                showMessage('Кошелек успешно подключен', 'success', globalMessage);
+                // Повторная проверка пригласителя (чтобы убедиться что не приглашаем сами себя)
+                if (referrerAddressInput.value) {
+                    checkReferrerExists();
+                }
                 
-                // Проверяем пригласителя после подключения кошелька
-                setTimeout(() => checkReferrerExists(), 1000);
+                showMessage('Кошелек подключен', 'success', globalMessage);
                 
                 window.ethereum.on('accountsChanged', async (accounts) => {
                     if (accounts.length === 0) {
@@ -489,8 +465,8 @@
                 });
                 
             } catch (error) {
-                console.error('Ошибка подключения кошелька:', error);
-                showMessage('Ошибка подключения кошелька: ' + error.message, 'error', globalMessage);
+                console.error('Ошибка подключения:', error);
+                showMessage('Ошибка подключения: ' + error.message, 'error', globalMessage);
             }
         }
         
@@ -515,10 +491,9 @@
                         activateTab('user');
                     }
                 }
-                
                 return isAdmin;
             } catch (error) {
-                console.error('Ошибка проверки администратора:', error);
+                console.error('Ошибка админа:', error);
                 return false;
             }
         }
@@ -529,7 +504,7 @@
             try {
                 const userData = await contract.methods.users(userAccount).call();
                 
-                // Обновляем реферальную ссылку
+                // Формируем реф. ссылку для текущего юзера
                 const currentUrl = window.location.href.split('?')[0];
                 const refLink = `${currentUrl}?ref=${userAccount}`;
                 referralLink.value = refLink;
@@ -541,21 +516,14 @@
                     updateUserLevels(userData);
                 }
                 
-                // Если пользователь не зарегистрирован и поле пригласителя пустое, заполняем адресом администратора
-                if (!userData.exists && !referrerAddressInput.value.trim() && !currentReferrer) {
-                    try {
-                        const adminAddress = await contract.methods.admin().call();
-                        referrerAddressInput.value = adminAddress;
-                        // Проверяем существование администратора как пригласителя
-                        setTimeout(() => checkReferrerExists(), 1000);
-                    } catch (error) {
-                        console.error('Ошибка получения адреса администратора:', error);
-                    }
+                // Если юзер не существует и поля пусты, можно подставить админа (опционально)
+                // Но лучше оставить поле пустым или то, что пришло по рефке
+                if (!userData.exists && !referrerAddressInput.value) {
+                    // Оставляем пустым, чтобы пользователь ввел сам или прошел по ссылке
                 }
                 
             } catch (error) {
-                console.error('Ошибка загрузки данных пользователя:', error);
-                showMessage('Ошибка загрузки данных пользователя', 'error', globalMessage);
+                console.error('Ошибка данных пользователя:', error);
             }
         }
         
@@ -570,10 +538,6 @@
                         <div class="stat-label">Стоимость регистрации</div>
                         <div class="stat-value">0.05 BNB</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Реферальная ссылка</div>
-                        <div class="stat-value" style="font-size: 1rem;">Готова</div>
-                    </div>
                 `;
                 return;
             }
@@ -584,79 +548,31 @@
                     <div class="stat-value">${userData.level}</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Внутренний баланс</div>
-                    <div class="stat-value">${web3.utils.fromWei(userData.internalBalance, 'ether').substring(0, 8)} BNB</div>
+                    <div class="stat-label">Баланс в системе</div>
+                    <div class="stat-value">${web3.utils.fromWei(userData.internalBalance, 'ether').substring(0, 6)} BNB</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Прямые рефералы</div>
                     <div class="stat-value">${userData.totalDirectReferrals}/2</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Рефералы на уровне</div>
+                    <div class="stat-label">Прогресс уровня</div>
                     <div class="stat-value">${userData.referralsInLevel}/${LEVEL_THRESHOLDS[userData.level] || 0}</div>
                 </div>
             `;
         }
         
         function updateAdminStats(userData) {
-            const hasAdminRecord = userData.exists;
-            
-            if (!hasAdminRecord) {
-                userStats.innerHTML = `
-                    <div class="admin-info-panel">
-                        <h3>Системный администратор</h3>
-                        <p>Вы являетесь администратором этого контракта.</p>
-                        <p>Администратор не участвует в реферальных уровнях как обычный пользователь.</p>
-                        <p>Ваша роль: управление контрактом, добавление пользователей и вывод комиссий.</p>
-                    </div>
-                `;
-                levelsContainer.innerHTML = `
-                    <div class="admin-info-panel">
-                        <h3>Информация для администратора</h3>
-                        <p>Администратор находится на <span class="highlight">системном уровне 10</span>.</p>
-                        <p>Это техническая необходимость для корректной работы распределения средств.</p>
-                        <p>Зеленые круги, которые вы видите, показывают количество пользователей, добавленных через <span class="highlight">adminAddUser()</span>.</p>
-                        <p>Администратор <span class="warning">не проходит апгрейды</span> и не выходит из системы при достижении 62 рефералов.</p>
-                    </div>
-                `;
-            } else {
-                userStats.innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-label">Статус</div>
-                        <div class="stat-value">Администратор</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Технический уровень</div>
-                        <div class="stat-value">10 (системный)</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Бесплатно добавлено</div>
-                        <div class="stat-value">${userData.referralsInLevel} пользователей</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Прямые рефералы</div>
-                        <div class="stat-value">${userData.totalDirectReferrals}</div>
-                    </div>
-                `;
-                
-                levelsContainer.innerHTML = `
-                    <div class="admin-info-panel">
-                        <h3>Внимание! Техническая информация</h3>
-                        <p>Администратор отображается как пользователь 10 уровня с <span class="highlight">62 кругами</span>.</p>
-                        <p>Это <span class="warning">техническая необходимость</span> для работы контракта, а не реальные уровни для прохождения.</p>
-                        <p>Зеленые круги: <span class="highlight">${userData.referralsInLevel}</span> из 62 (бесплатно добавленные пользователи).</p>
-                        <p>Даже при достижении 62 рефералов администратор <span class="warning">НЕ пройдет апгрейд и НЕ выйдет</span> из системы.</p>
-                        <p style="margin-top: 15px; font-size: 0.9rem; color: #ffaa00;">
-                            ⚠️ Если счетчик приблизится к 62, рекомендуется пересмотреть логику контракта.
-                        </p>
-                    </div>
-                `;
-            }
+            userStats.innerHTML = `
+                <div class="stat-card"><div class="stat-label">Роль</div><div class="stat-value">Admin</div></div>
+                <div class="stat-card"><div class="stat-label">Добавлено юзеров</div><div class="stat-value">${userData.referralsInLevel}</div></div>
+            `;
+            levelsContainer.innerHTML = '<div class="admin-info-panel"><p>Вы администратор. Управление происходит в панели администратора.</p></div>';
         }
         
         function updateUserLevels(userData) {
             if (!userData.exists) {
-                levelsContainer.innerHTML = '<div class="loading">Загрузка данных...</div>';
+                levelsContainer.innerHTML = '<div class="loading">Нет данных</div>';
                 return;
             }
             
@@ -679,13 +595,10 @@
                             <div class="level-name">Уровень ${level}</div>
                             <div class="level-required">Нужно: ${threshold} рефералов</div>
                         </div>
-                        <div class="circles-container">
-                            ${circlesHTML}
-                        </div>
+                        <div class="circles-container">${circlesHTML}</div>
                     </div>
                 `;
             }
-            
             levelsContainer.innerHTML = levelsHTML;
         }
         
@@ -693,26 +606,14 @@
             try {
                 const contractBalance = await web3.eth.getBalance(CONTRACT_ADDRESS);
                 const adminAddress = await contract.methods.admin().call();
-                const entryPrice = await contract.methods.ENTRY_PRICE().call();
                 
                 adminStats.innerHTML = `
                     <div class="admin-stat-card">
-                        <div class="admin-stat-label">Адрес администратора</div>
-                        <div class="admin-stat-value" style="font-size: 1.2rem;">${shortenAddress(adminAddress)}</div>
-                    </div>
-                    <div class="admin-stat-card">
                         <div class="admin-stat-label">Баланс контракта</div>
-                        <div class="admin-stat-value">${web3.utils.fromWei(contractBalance, 'ether').substring(0, 8)} BNB</div>
-                    </div>
-                    <div class="admin-stat-card">
-                        <div class="admin-stat-label">Стоимость входа</div>
-                        <div class="admin-stat-value">${web3.utils.fromWei(entryPrice, 'ether')} BNB</div>
+                        <div class="admin-stat-value">${web3.utils.fromWei(contractBalance, 'ether').substring(0, 6)} BNB</div>
                     </div>
                 `;
-                
-            } catch (error) {
-                console.error('Ошибка загрузки данных администратора:', error);
-            }
+            } catch (error) { console.error(error); }
         }
         
         async function registerUser() {
@@ -723,262 +624,104 @@
             
             let referrerAddress = referrerAddressInput.value.trim();
             
-            // Если поле пустое, используем текущий реферер
-            if (!referrerAddress && currentReferrer) {
-                referrerAddress = currentReferrer;
-            }
-            
             if (!referrerAddress) {
-                showMessage('Введите адрес пригласителя или используйте реферальную ссылку', 'error', registerMessage);
+                showMessage('Введите адрес пригласителя', 'error', registerMessage);
                 return;
             }
             
-            // Проверяем формат адреса
             if (!web3.utils.isAddress(referrerAddress)) {
-                showMessage('Неверный формат адреса пригласителя', 'error', registerMessage);
+                showMessage('Неверный адрес пригласителя', 'error', registerMessage);
                 return;
             }
             
-            // Преобразуем адрес к правильному формату (checksum)
             referrerAddress = web3.utils.toChecksumAddress(referrerAddress);
             
+            if (referrerAddress.toLowerCase() === userAccount.toLowerCase()) {
+                showMessage('Нельзя пригласить самого себя', 'error', registerMessage);
+                return;
+            }
+            
             try {
-                // Проверяем, существует ли пригласитель
-                const referrerData = await contract.methods.users(referrerAddress).call();
-                if (!referrerData.exists) {
-                    showMessage('Пригласитель не зарегистрирован в системе. Укажите адрес существующего участника.', 'error', registerMessage);
-                    return;
-                }
-                
-                // Проверяем, не пытается ли пользователь зарегистрировать сам себя
-                if (referrerAddress.toLowerCase() === userAccount.toLowerCase()) {
-                    showMessage('Вы не можете указать себя в качестве пригласителя', 'error', registerMessage);
-                    return;
-                }
-                
-                // Проверяем, не достиг ли пригласитель лимита в 2 реферала
-                if (referrerData.totalDirectReferrals >= 2) {
-                    showMessage('Пригласитель уже имеет 2 реферала. Выберите другого пригласителя.', 'error', registerMessage);
-                    return;
-                }
-                
-                // Проверяем, зарегистрирован ли уже пользователь
-                const userData = await contract.methods.users(userAccount).call();
-                if (userData.exists) {
-                    showMessage('Вы уже зарегистрированы в системе', 'error', registerMessage);
-                    return;
-                }
-                
-                // Получаем стоимость регистрации
                 const entryPrice = await contract.methods.ENTRY_PRICE().call();
                 
-                // Проверяем баланс пользователя
-                const userBalance = await web3.eth.getBalance(userAccount);
-                if (BigInt(userBalance) < BigInt(entryPrice) + BigInt(web3.utils.toWei('0.001', 'ether'))) {
-                    showMessage(`Недостаточно средств. Нужно: ${web3.utils.fromWei(entryPrice, 'ether')} BNB + комиссия газа`, 'error', registerMessage);
-                    return;
-                }
-                
-                // Выполняем регистрацию
                 await contract.methods.register(referrerAddress).send({
                     from: userAccount,
                     value: entryPrice,
                     gas: 300000
                 });
                 
-                showMessage('Регистрация успешно завершена!', 'success', registerMessage);
-                
-                // Обновляем данные пользователя
-                setTimeout(() => {
-                    loadUserData();
-                    checkReferrerExists();
-                }, 2000);
+                showMessage('Регистрация успешна!', 'success', registerMessage);
+                setTimeout(() => { loadUserData(); }, 2000);
                 
             } catch (error) {
                 console.error('Ошибка регистрации:', error);
-                let errorMsg = error.message;
+                // Пытаемся достать понятную ошибку
+                let msg = error.message;
+                if (msg.includes('Referrer does not exist')) msg = 'Пригласитель не найден в системе';
+                if (msg.includes('Referrer already has 2 referrals')) msg = 'У пригласителя нет мест';
+                if (msg.includes('insufficient funds')) msg = 'Недостаточно средств';
                 
-                // Расшифровываем сообщения об ошибках
-                if (error.message.includes('Referrer does not exist')) {
-                    errorMsg = 'Пригласитель не зарегистрирован в системе';
-                } else if (error.message.includes('Send 0.05 BNB')) {
-                    errorMsg = 'Неверная сумма отправления. Требуется 0.05 BNB';
-                } else if (error.message.includes('Referrer already has 2 referrals')) {
-                    errorMsg = 'Пригласитель уже имеет 2 реферала';
-                } else if (error.message.includes('Your referrer must reach Level 2 first')) {
-                    errorMsg = 'Ваш пригласитель должен сначала достичь 2 уровня';
-                } else if (error.message.includes('User denied transaction')) {
-                    errorMsg = 'Вы отклонили транзакцию в MetaMask';
-                } else if (error.message.includes('insufficient funds')) {
-                    errorMsg = 'Недостаточно средств на балансе';
-                } else if (error.message.includes('gas')) {
-                    errorMsg = 'Ошибка газа. Увеличьте лимит газа в MetaMask';
-                }
-                
-                showMessage(`Ошибка регистрации: ${errorMsg}`, 'error', registerMessage);
+                showMessage(`Ошибка: ${msg}`, 'error', registerMessage);
             }
         }
         
         async function addUserByAdmin() {
-            if (!isAdmin) {
-                showMessage('Только администратор может добавлять пользователей', 'error', addUserMessage);
-                return;
-            }
+            if (!isAdmin) return;
+            const u = document.getElementById('newUserAddress').value.trim();
+            const r = document.getElementById('newUserReferrer').value.trim();
             
-            const newUserAddress = document.getElementById('newUserAddress').value.trim();
-            const newUserReferrer = document.getElementById('newUserReferrer').value.trim();
-            
-            if (!newUserAddress || !newUserReferrer) {
-                showMessage('Заполните все поля', 'error', addUserMessage);
-                return;
-            }
-            
-            if (!web3.utils.isAddress(newUserAddress) || !web3.utils.isAddress(newUserReferrer)) {
-                showMessage('Неверный формат адреса', 'error', addUserMessage);
+            if (!web3.utils.isAddress(u) || !web3.utils.isAddress(r)) {
+                showMessage('Неверные адреса', 'error', addUserMessage);
                 return;
             }
             
             try {
-                // Преобразуем адреса к checksum формату
-                const checksumNewUser = web3.utils.toChecksumAddress(newUserAddress);
-                const checksumReferrer = web3.utils.toChecksumAddress(newUserReferrer);
-                
-                await contract.methods.adminAddUser(checksumNewUser, checksumReferrer).send({
+                await contract.methods.adminAddUser(web3.utils.toChecksumAddress(u), web3.utils.toChecksumAddress(r)).send({
                     from: userAccount,
                     gas: 300000
                 });
-                
-                showMessage('Пользователь успешно добавлен', 'success', addUserMessage);
-                
-                // Очищаем поля
-                document.getElementById('newUserAddress').value = '';
-                document.getElementById('newUserReferrer').value = '';
-                
-            } catch (error) {
-                console.error('Ошибка добавления пользователя:', error);
-                showMessage(`Ошибка: ${error.message}`, 'error', addUserMessage);
-            }
+                showMessage('Добавлено!', 'success', addUserMessage);
+            } catch (e) { showMessage(e.message, 'error', addUserMessage); }
         }
         
         async function withdrawAdminFees() {
-            if (!isAdmin) {
-                showMessage('Только администратор может выводить комиссии', 'error', withdrawMessage);
-                return;
-            }
-            
+            if (!isAdmin) return;
             try {
-                await contract.methods.withdrawAdminFees().send({
-                    from: userAccount,
-                    gas: 200000
-                });
-                
-                showMessage('Комиссии успешно выведены на кошелек администратора', 'success', withdrawMessage);
-                
-                setTimeout(() => {
-                    loadAdminData();
-                }, 2000);
-                
-            } catch (error) {
-                console.error('Ошибка вывода комиссий:', error);
-                showMessage(`Ошибка: ${error.message}`, 'error', withdrawMessage);
-            }
+                await contract.methods.withdrawAdminFees().send({ from: userAccount, gas: 200000 });
+                showMessage('Выведено!', 'success', withdrawMessage);
+            } catch (e) { showMessage(e.message, 'error', withdrawMessage); }
         }
         
         async function searchUser() {
-            const searchAddress = document.getElementById('searchAddress').value.trim();
-            
-            if (!searchAddress) {
-                showMessage('Введите адрес для поиска', 'error', globalMessage);
-                return;
-            }
-            
-            if (!web3.utils.isAddress(searchAddress)) {
-                showMessage('Неверный формат адреса', 'error', globalMessage);
-                return;
-            }
+            const addr = document.getElementById('searchAddress').value.trim();
+            if (!web3.utils.isAddress(addr)) return;
             
             try {
-                const checksumAddress = web3.utils.toChecksumAddress(searchAddress);
-                const userData = await contract.methods.users(checksumAddress).call();
-                
-                if (!userData.exists) {
-                    userDetails.innerHTML = '<div class="stat-value">Пользователь не найден</div>';
+                const data = await contract.methods.users(web3.utils.toChecksumAddress(addr)).call();
+                if (!data.exists) {
+                    userDetails.innerHTML = 'Пользователь не найден';
                 } else {
                     userDetails.innerHTML = `
-                        <div class="user-detail">
-                            <label>Адрес</label>
-                            <span>${shortenAddress(checksumAddress)}</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>Уровень</label>
-                            <span>${userData.level}</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>Пригласитель</label>
-                            <span>${shortenAddress(userData.referrer)}</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>Прямые рефералы</label>
-                            <span>${userData.totalDirectReferrals}/2</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>На уровне</label>
-                            <span>${userData.referralsInLevel}/${LEVEL_THRESHOLDS[userData.level] || 0}</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>Внутренний баланс</label>
-                            <span>${web3.utils.fromWei(userData.internalBalance, 'ether').substring(0, 8)} BNB</span>
-                        </div>
-                        <div class="user-detail">
-                            <label>Зарегистрирован</label>
-                            <span>${new Date(userData.registrationTime * 1000).toLocaleDateString('ru-RU')}</span>
-                        </div>
+                        <div class="user-detail"><label>Уровень</label><span>${data.level}</span></div>
+                        <div class="user-detail"><label>Пригласитель</label><span>${shortenAddress(data.referrer)}</span></div>
+                        <div class="user-detail"><label>Рефералы</label><span>${data.totalDirectReferrals}/2</span></div>
                     `;
                 }
-                
                 searchResults.style.display = 'block';
-                
-            } catch (error) {
-                console.error('Ошибка поиска пользователя:', error);
-                showMessage(`Ошибка поиска: ${error.message}`, 'error', globalMessage);
-            }
+            } catch (e) { console.error(e); }
         }
         
         function activateTab(tabId) {
-            if (tabId === 'admin' && !isAdmin) {
-                showMessage('Доступ только для администратора', 'error', globalMessage);
-                return;
-            }
-            
-            tabs.forEach(tab => {
-                if (tab.getAttribute('data-tab') === tabId) {
-                    tab.classList.add('active');
-                } else {
-                    tab.classList.remove('active');
-                }
-            });
-            
-            tabContents.forEach(content => {
-                if (content.id === `${tabId}Tab`) {
-                    content.classList.add('active');
-                } else {
-                    content.classList.remove('active');
-                }
-            });
-            
-            if (tabId === 'admin' && isAdmin) {
-                loadAdminData();
-            }
+            if (tabId === 'admin' && !isAdmin) return;
+            tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tabId));
+            tabContents.forEach(c => c.classList.toggle('active', c.id === `${tabId}Tab`));
         }
         
         function showMessage(text, type, element) {
             element.textContent = text;
             element.className = `message ${type}`;
             element.style.display = 'block';
-            
-            setTimeout(() => {
-                element.style.display = 'none';
-            }, 5000);
+            setTimeout(() => { element.style.display = 'none'; }, 5000);
         }
         
         function shortenAddress(address) {
@@ -989,17 +732,11 @@
         function resetUI() {
             userAccount = null;
             isAdmin = false;
-            currentReferrer = null;
             connectWalletBtn.textContent = 'Подключить кошелек';
-            connectWalletBtn.style.background = 'linear-gradient(45deg, #00ff9d, #00b8ff)';
             walletInfo.style.display = 'none';
             adminBadge.style.display = 'none';
-            currentRefInfo.style.display = 'none';
             userStats.innerHTML = '';
             levelsContainer.innerHTML = '';
-            referralLink.value = 'Подключите кошелек для получения ссылки';
-            referrerStatus.innerHTML = '';
-            referrerCheckResult.style.display = 'none';
         }
     </script>
 </body>
